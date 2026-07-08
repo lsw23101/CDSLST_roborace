@@ -243,8 +243,50 @@ ros2 run f1tenth_mppi_nav record_path --ros-args -p output_file:=$(pwd)/paths/my
 
 ---
 
-## 7. TODO / 다음 단계
+## 7. 실제 하드웨어(F1TENTH 실차)로 이관하기
+
+이 스택은 시뮬레이터와 실차가 **동일한 토픽 규약**(`/scan`, `/drive`, `map→base_link` tf)을 쓰도록 처음부터 설계되어 있어서, MPPI/경로추종 쪽 코드(`controller_server` 설정, `path_follower`, `cmd_vel_to_ackermann`)는 거의 그대로 재사용할 수 있습니다. 다만 시뮬레이터는 "정답 위치"를 그냥 tf로 흘려주지만 실차에는 그게 없으므로, **위치추정(localization)을 새로 추가**해야 합니다. 큰 흐름은 아래와 같습니다.
+
+### 7.1 실차 드라이버 브링업
+
+`f1tenth/f1tenth_system`(공식 실차 드라이버 저장소, 라이다 + VESC 모터 드라이버)을 실차의 온보드 컴퓨터(Jetson 등)에 설치해서 브링업합니다. 이 저장소도 `/scan`, `/drive`, `/odom`(휠 오도메트리)을 시뮬레이터와 같은 메시지 타입으로 발행/구독하도록 되어 있습니다.
+
+### 7.2 맵 만들기 (SLAM)
+
+시뮬레이터와 달리 이제 진짜로 맵이 없으므로, `slam_toolbox`로 실제 트랙을 한 바퀴 천천히 수동 주행(조이스틱/키보드 텔레옵)하면서 맵을 만듭니다:
+```bash
+sudo apt install ros-humble-slam-toolbox
+ros2 launch slam_toolbox online_async_launch.py   # 트랙 주행하며 맵 완성
+ros2 run nav2_map_server map_saver_cli -f ~/my_track_map   # 완성되면 저장
+```
+저장된 `my_track_map.yaml`/`.png`가 지금 쓰는 `Silverstone_map.yaml`/`.png`와 **완전히 같은 포맷**입니다 — 이후 과정은 형식 걱정 없이 그대로 이어집니다.
+
+### 7.3 로컬라이제이션 추가 (시뮬레이션과의 가장 큰 차이)
+
+7.2에서 만든 맵에 대해 `slam_toolbox`를 localization 모드로 켜거나(추천) `nav2_amcl`을 씁니다. 둘 다 라이다 스캔을 맵과 매칭해서 `map→odom` tf를 계산해주고, 휠 오도메트리가 `odom→base_link`를 채워줘서 결과적으로 `controller_server`가 필요로 하는 `map→base_link`가 완성됩니다. `src/f1tenth_mppi_nav/config/nav2_params.yaml`에는 로컬라이제이션 관련 설정이 빠져있으니, 실차용으로는 `amcl` 섹션을 새로 추가하고 `lifecycle_manager`의 관리 노드 목록에도 넣어야 합니다.
+
+### 7.4 전역 경로 만들기 — 지금과 완전히 같은 방법
+
+7.2에서 만든 맵에 대해 아래 둘 중 하나를 오프라인으로 한 번만 실행하면 됩니다 (지금 Silverstone에서 한 것과 동일한 절차):
+- `scripts/extract_centerline.py <my_track_map.yaml> <output.csv>` — 이미지 스켈레톤화로 자동 추출 (실제 SLAM 맵은 대개 안/밖이 채워진 형태라 Silverstone처럼 순수 선으로만 그려진 맵보다 오히려 더 안정적으로 동작할 가능성이 높습니다)
+- `record_path.py`로 직접 한 바퀴 운전하며 기록 — 이제 7.3의 실제 로컬라이제이션이 `map→base_link`를 채워주므로 시뮬레이션 때와 동일한 방식으로 바로 동작합니다
+
+### 7.5 파라미터 재조정 (반드시 필요)
+
+- `robot_base_frame`을 실차 URDF의 프레임 이름(보통 `base_link`, 시뮬레이션의 `ego_racecar/base_link`가 아님)에 맞게 수정
+- `odom_topic`을 실차 드라이버가 실제 발행하는 토픽명으로 수정
+- `vx_max`, `wz_max`, `AckermannConstraints.min_turning_r`을 실차의 실제 휠베이스/최대 조향각/타이어 마찰 한계에 맞게 다시 계산 — 처음엔 지금보다 훨씬 보수적으로 낮게 잡고 점진적으로 올리는 걸 강력히 권장
+- MPPI `batch_size`/`time_steps`는 온보드 컴퓨터(Jetson 등)의 실시간 연산 성능에 맞게 낮춰야 할 수 있음 (시뮬레이션은 PC에서 여유 있게 돌지만 임베디드 보드는 연산력이 부족할 수 있음)
+- `cmd_vel_to_ackermann`의 `wheelbase`/`max_steering_angle` 파라미터를 실차 실측값으로 수정
+
+### 7.6 안전
+
+처음엔 반드시 저속으로, 사람이 즉시 개입할 수 있는 킬스위치/비상정지를 준비한 상태에서 테스트하세요.
+
+---
+
+## 8. TODO / 다음 단계
 
 - [ ] 더 빠른 랩타임을 위한 MPPI critic 가중치 추가 튜닝
 - [ ] `f1tenth_gym_ros`의 경량 물리엔진이 아니라 실제 Gazebo(gz-sim) 물리 시뮬레이션으로 이전 (Ackermann steering 플러그인 + `ros_gz` 브릿지)
-- [ ] 실차(F1TENTH 하드웨어) 이관 — 토픽 규약(`/scan`, `/drive`, `/ego_racecar/odom` → 실차는 네임스페이스만 다름)이 이미 호환되도록 설계되어 있어 상위 스택(MPPI/경로 추종) 코드 변경 없이 드라이버만 교체하면 됨
+- [ ] 실차(F1TENTH 하드웨어) 이관 — 7절 참고
