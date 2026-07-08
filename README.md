@@ -231,6 +231,15 @@ ros2 run f1tenth_mppi_nav record_path --ros-args -p output_file:=$(pwd)/paths/my
 - **`lifecycle_manager`가 "Failed to change state" 에러**: 같은 이름(`map_server` 등)의 노드가 이미 다른 터미널에서 떠 있는 경우입니다. `ps aux | grep map_server` 등으로 좀비 프로세스를 찾아 종료하세요. (이 저장소의 launch 파일들은 애초에 `map_server`를 직접 띄우지 않고 `f1tenth_gym_ros`가 띄운 걸 재사용하도록 만들어서 이 문제를 피합니다.)
 - **`CostCritic` 관련 "no robot footprint provided" 에러**: `consider_footprint: true`인데 costmap에 정확한 폴리곤 footprint가 없어서 발생. 이 저장소 설정은 `consider_footprint: false`로 두고 `robot_radius`(원형 근사)를 씁니다.
 - **Gazebo Harmonic/Ionic 버전 충돌**: 현재 파이프라인은 Gazebo를 전혀 쓰지 않아 무관하지만, 나중에 실제 Gazebo 물리 시뮬레이션으로 확장할 계획이 있다면 `gz-ionic`과 `ros-humble-ros-gzharmonic-*`을 동시에 설치하지 않도록 주의하세요 (`gz sim --version` 실행 시 protobuf 중복 등록 에러가 뜨면 충돌 상태).
+- **시뮬레이터 실행 시 `AttributeError: module 'coverage' has no attribute 'types'`로 `gym_bridge`가 죽는 경우**: 시스템에 이미 깔려있던 `python3-coverage`(apt) 버전이 `numba`(물리엔진이 씀)와 안 맞아서 생깁니다. `~/.local`에 최신 버전을 pip로 설치해서 덮어쓰면 해결됩니다:
+  ```bash
+  pip3 install --user --upgrade coverage
+  ```
+- **`import numpy` 버전이 안 맞거나, 이후 다른 pip 패키지 설치로 `numpy`가 최신 버전으로 올라가버린 경우**: `f110_gym`은 `numpy<=1.22.0`에 강하게 의존합니다 (`numba` 구버전과 ABI 호환 문제). 아래처럼 버전을 되돌리면 됩니다:
+  ```bash
+  pip3 install --user 'numpy==1.22.0' 'scipy==1.8.0'
+  python3 -c "import f110_gym; print('OK')"   # 확인
+  ```
 
 ---
 
