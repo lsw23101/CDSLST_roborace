@@ -6,30 +6,39 @@ F1TENTH(RoboRacer) 차량을 ROS2 Humble + `f1tenth_gym_ros` 시뮬레이터 위
 
 ## 전체 구조 요약
 
+세 개의 서로 다른 성격의 컴포넌트가 토픽/액션으로 느슨하게 연결되어 있습니다: **① 외부에서 클론해오는 시뮬레이터**, **② ROS2 Humble에 이미 내장되어 있는 Nav2 표준 컴포넌트**, **③ 이 저장소에서 직접 만든 연결 코드**.
+
 ```
-┌────────────────────────┐        /scan, /ego_racecar/odom, /map
-│  f1tenth_gym_ros        │ ───────────────────────────────────┐
-│  (경량 물리 시뮬레이터,   │                                      │
-│   RViz2로 시각화)        │ ◄───────── /drive (AckermannDriveStamped)
-└────────────────────────┘                                      │
-                                                                  │
-┌─────────────────────────────────────────────────────────────┐ │
-│  src/f1tenth_mppi_nav  (이 저장소)                              │ │
-│                                                                 │ │
-│  paths/*.csv  ──▶  path_follower  ──(FollowPath action)──▶  controller_server
-│  (미리 만든 전역 경로)                                     (nav2_mppi_controller, Ackermann 모델)
-│                                                                 │
-│                                          /cmd_vel (Twist) ◄─────┘
-│                                                │
-│                                   cmd_vel_to_ackermann
-│                                                │
-│                                          /drive (AckermannDriveStamped) ──▶ (위 시뮬레이터로)
-└─────────────────────────────────────────────────────────────┘
+┌───────────────────────────┐   /scan, /map, /ego_racecar/odom (map→base_link tf 포함, ground truth)
+│  ① f1tenth_gym_ros          │ ───────────────────────────────────────────┐
+│  (외부 클론, 경량 물리        │                                              │
+│   시뮬레이터 + RViz2 시각화)  │ ◄──────────────── /drive (AckermannDriveStamped)
+└───────────────────────────┘                                              │
+                                                                             │
+┌───────────────────────────────────────────┐   ┌─────────────────────────┴──┐
+│  ③ src/f1tenth_mppi_nav  (이 저장소)          │   │  ② nav2_controller_server    │
+│                                                │   │  (ROS2 Humble 표준 설치,      │
+│  paths/*.csv                                  │   │   ros-humble-navigation2     │
+│      │                                        │   │   패키지 그대로 사용,          │
+│      ▼                                        │   │   직접 구현한 코드 아님)       │
+│  path_follower ──(FollowPath 액션 goal)───────▶│   │                             │
+│                                                │   │  플러그인: nav2_mppi_        │
+│                              /cmd_vel(Twist) ◄─┼───┤  controller::MPPIController  │
+│                                    │           │   │  (motion_model: Ackermann)   │
+│                                    ▼           │   └─────────────────────────────┘
+│                        cmd_vel_to_ackermann     │
+│                                    │            │
+│                                    ▼            │
+│                       /drive (AckermannDriveStamped) ──▶ (①로 다시)
+└────────────────────────────────────────────────┘
 ```
 
-- **맵**: `f1tenth_racetracks`가 제공하는 실제 F1 서킷 맵(Silverstone)을 그대로 사용합니다.
-- **전역 경로**: 맵을 직접 주행하며 만드는 대신, `f1tenth_racetracks`가 이미 제공하는 정확한 centerline 데이터를 우리 포맷으로 변환해서 사용합니다 (`scripts/convert_racetrack_csv.py`). 이 경로는 **오프라인으로 한 번만 생성**되고 `paths/silverstone_track.csv`에 저장되어 있습니다.
-- **MPPI 제어**: Nav2에 기본 내장된 `nav2_mppi_controller`를 그대로 사용합니다 (별도 구현 없음). `controller_server`가 이 컨트롤러를 돌리고, 저장된 전역 경로를 `follow_path` 액션으로 바로 받아서 추종합니다 — RViz에서 매번 목표 지점을 클릭할 필요가 없습니다.
+- **① 시뮬레이터 (외부)**: `f1tenth_gym_ros` — 별도 저장소를 그대로 클론. 라이다 스캔, 맵, ground-truth 오도메트리(`map→ego_racecar/base_link` tf)를 퍼블리시하고 `/drive` 명령을 받아 차량을 움직입니다.
+- **② MPPI 컨트롤러 (ROS2 Humble 내장)**: `nav2_mppi_controller`는 저희가 만든 게 아니라 `sudo apt install ros-humble-navigation2`로 설치되는 **Nav2의 표준 컨트롤러 플러그인**입니다. `controller_server`라는 Nav2 표준 노드(역시 내장)가 이 플러그인을 로드해서 실행합니다. 저희는 이걸 직접 실행(`ros2 run nav2_controller controller_server`)하고, `src/f1tenth_mppi_nav/config/nav2_params.yaml`로 파라미터(속도 제한, motion model, critic 가중치 등)만 설정해서 씁니다 — MPPI 알고리즘 자체의 코드는 한 줄도 저희가 작성하지 않았습니다.
+- **③ 연결 코드 (이 저장소)**: ①과 ②는 원래 서로 호환되게 설계된 게 아니라서, 이 둘을 잇는 최소한의 코드만 저희가 작성했습니다.
+  - `path_follower`: 미리 만든 전역 경로(csv)를 읽어서 ②의 `controller_server`가 노출하는 `follow_path` 액션에 직접 전송 (Nav2의 `bt_navigator`/`planner_server`는 안 씀 — 목표 지점을 매번 지정할 필요가 없어짐)
+  - `cmd_vel_to_ackermann`: ②가 표준으로 출력하는 `geometry_msgs/Twist`(`/cmd_vel`)를 ①이 요구하는 `AckermannDriveStamped`(`/drive`)로 변환 (자전거 모델 기반)
+- **맵/전역 경로**: 맵은 `f1tenth_racetracks`가 제공하는 실제 F1 서킷(Silverstone)을 그대로 쓰고, 전역 경로도 그 저장소가 제공하는 정확한 centerline 데이터를 `scripts/convert_racetrack_csv.py`로 변환해서 **오프라인으로 한 번만** 만들어 `paths/silverstone_track.csv`에 저장해둔 것입니다.
 
 ---
 
