@@ -1,0 +1,11 @@
+build/
+install/
+log/
+__pycache__/
+*.pyc
+.vscode/
+
+# external repos cloned separately per README, not vendored in this repo
+/f1tenth_gym/
+/f1tenth_racetracks/
+/src/f1tenth_gym_ros/
